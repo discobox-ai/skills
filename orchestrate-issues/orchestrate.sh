@@ -36,6 +36,21 @@ touch "$W" "$T" "$ORCH_DIR/tried.txt" "$ORCH_DIR/rebased.txt" "$ORCH_DIR/retired
 JQ_TITLE='def title: ([(.runtime.agentStatus.sessions // [])[] | select(.primary and ((.title // "") != ""))]
 	| sort_by(.startedAt // "") | last | .title) // "";'
 
+# The uses SKILL.md §1 asks for, by the job each opens with.
+CREATE='^Create worker discoboxes'
+SUPERVISE='^Supervise the discoboxes I created'
+ANSWER='^Answer pending credential requests'
+TRACK='^Track the work my discoboxes do'
+
+# The checkout the skills are read from: a worker's ask is approved only when it is, word for word,
+# the use its skill asks for (cmd_approve). Without the skills nothing is approved here.
+ROOT=${ORCH_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}
+# skill_use <skill> <prefix>: the use that skill's SKILL.md asks for, whose text starts with prefix.
+skill_use() {
+	[ -n "$ROOT" ] && grep -o "\"description\": \"$2[^\"]*\"" "$ROOT/.agents/skills/$1/SKILL.md" 2>/dev/null |
+		head -1 | sed 's/^"description": "//; s/"$//'
+}
+
 # use <credential-name> <regex>: the live use ID whose description matches.
 # The listing fails now and then for a moment, so an empty answer is asked again before it counts.
 use() {
@@ -50,8 +65,8 @@ use() {
 }
 # need <use-id> <what>: a missing use is printed as MISSING USE (watch exits on it) and fails the caller.
 need() { [ -n "$1" ] && return 0; echo "MISSING USE: no live use for $2; ask for it (SKILL.md §1)"; return 1; }
-box()  { local u; u=$(use ai.discobox.sandbox '^discobox admin box ls'); need "$u" "box ls/get" || return 1; discobox-access run --use "$u" -- discobox admin box "$@" </dev/null; }
-gh_()  { local u; u=$(use github 'pulls \(with query parameters\), repos/[^ ]+/pulls/<number>'); need "$u" "PR reads" || return 1; discobox-access run --use "$u" -- gh "$@" </dev/null; }
+box()  { local u; u=$(use ai.discobox.sandbox "$SUPERVISE"); need "$u" "supervising boxes" || return 1; discobox-access run --use "$u" -- discobox admin box "$@" </dev/null; }
+gh_()  { local u; u=$(use github "$TRACK"); need "$u" "tracking GitHub" || return 1; discobox-access run --use "$u" -- gh "$@" </dev/null; }
 
 workers() { grep -v '^\s*$' "$W" || true; }
 id_of()   { awk -v n="$1" '$1==n{print $2}' "$W"; }
@@ -85,26 +100,21 @@ cmd_status() {
 }
 
 cmd_screen() { # screen <discobox-id> [lines] [scrollback]
-	local u; u=$(use ai.discobox.sandbox '^discobox admin terminal ls'); need "$u" "terminal screen" || return 1
+	local u; u=$(use ai.discobox.sandbox "$SUPERVISE"); need "$u" "supervising boxes" || return 1
 	discobox-access run --use "$u" -- discobox admin terminal screen primary --discobox-id "$1" ${3:+--scrollback "$3"} </dev/null 2>&1 |
 		grep -v '^\s*$' | tail -"${2:-25}" | cut -c1-170
 }
 
 cmd_say() { # say <discobox-id> <keys or text>...
 	local id=$1 u; shift
-	u=$(use ai.discobox.sandbox '^discobox admin terminal input'); need "$u" "terminal input" || return 1
+	u=$(use ai.discobox.sandbox "$SUPERVISE"); need "$u" "supervising boxes" || return 1
 	discobox-access run --use "$u" -- discobox admin terminal input primary --discobox-id "$id" "$@" </dev/null 2>&1 | tail -1
 }
 
-cmd_power() { # power start|stop|restart <discobox-id>...: the top-level form when a use names it, else the admin one
+cmd_power() { # power start|stop|restart <discobox-id>...
 	local verb=$1 u; shift
-	u=$(use ai.discobox.sandbox '^discobox start <')
-	if [ -n "$u" ]; then
-		discobox-access run --use "$u" -- discobox "$verb" "$@" </dev/null 2>&1 | tail -3
-		return
-	fi
-	u=$(use ai.discobox.sandbox '^discobox admin box start'); need "$u" "start/stop" || return 1
-	discobox-access run --use "$u" -- discobox admin box "$verb" "$@" </dev/null 2>&1 | tail -3
+	u=$(use ai.discobox.sandbox "$SUPERVISE"); need "$u" "supervising boxes" || return 1
+	discobox-access run --use "$u" -- discobox "$verb" "$@" </dev/null 2>&1 | tail -3
 }
 
 # running <discobox-id> [seconds]: wait until the discobox is running and its harness is back at a prompt.
@@ -128,7 +138,7 @@ cmd_retire() { # retire <issue>|<discobox-id> [merged]: a triage box has no issu
 	case "$n" in sbx_*) id=$n ;; *) id=$(id_of "$n") ;; esac
 	[ -n "$id" ] || { echo "#$n: no worker"; return 1; }
 	box get "$id" -o json >/dev/null 2>&1 || { echo "$id" >>"$ORCH_DIR/retired.txt"; echo "#$n $id is already deleted"; return 0; }
-	u=$(use ai.discobox.sandbox '^discobox tag <'); need "$u" "discobox tag" || return 1
+	u=$(use ai.discobox.sandbox "$SUPERVISE"); need "$u" "supervising boxes" || return 1
 	out=$(discobox-access run --use "$u" -- discobox tag "$id" "${tags[@]}" --rm ready --rm blocked </dev/null 2>&1) ||
 		{ echo "#$n $id not tagged: $(echo "$out" | tail -1)"; return 1; }
 	echo "$id" >>"$ORCH_DIR/retired.txt"
@@ -137,24 +147,34 @@ cmd_retire() { # retire <issue>|<discobox-id> [merged]: a triage box has no issu
 	echo "#$n $id tagged ${tags[*]} and stopped"
 }
 
+# A worker's ask is approved here only when its one use is the use its own skill asks for, with its
+# issue filled in: deliver-issue §0 for a delivering box, triage-issue §0 for a triaging one. The
+# server's delegation check refuses a use that drops a "Never …" of its line, but a judge can miss
+# one, and nothing here reads the ask; anything else goes to the lead to read, as NEEDS LEAD.
 cmd_approve() { # approve pending com.github.api use requests from workers, once each
-	local u ua reqs
-	u=$(use ai.discobox.sandbox '^discobox secret request ls'); need "$u" "request ls" || return 1
-	ua=$(use ai.discobox.sandbox '^discobox secret request approve'); need "$ua" "approve" || return 1
+	local u reqs
+	u=$(use ai.discobox.sandbox "$ANSWER"); need "$u" "answering requests" || return 1
 	reqs=$(discobox-access run --use "$u" -- discobox secret request ls -o json </dev/null 2>/dev/null |
-		jq -r '.secretRequests[]? | select(.status=="pending") | "\(.id) \(.sandboxId) \(.purpose) \(.wellKnownId)"')
-	while read -r rid sid purpose wk; do
+		jq -r '.secretRequests[]? | select(.status=="pending")
+			| "\(.id) \(.sandboxId) \(.purpose) \(.wellKnownId) \(.uses // [] | map(.description) | @json | @base64)"')
+	while read -r rid sid purpose wk asked; do
 		[ -z "$rid" ] && continue
 		grep -qx "$rid" "$ORCH_DIR/tried.txt" && continue
 		echo "$rid" >>"$ORCH_DIR/tried.txt"
-		local n; n=$(awk -v s="$sid" '$2==s{print $1}' "$W")
+		local n want; n=$(awk -v s="$sid" '$2==s{print $1}' "$W")
 		[ -z "$n" ] && n=$(awk -v s="$sid" '$1==s{print "t"$2}' "$T")
-		if [ -n "$n" ] && [ "$purpose" = use ] && [ "$wk" = com.github.api ]; then
-			local res; res=$(discobox-access run --use "$ua" -- discobox secret request approve "$rid" </dev/null 2>&1 | tail -3 | head -1 | cut -c1-300)
+		case "$n" in
+		t*) want=$(skill_use triage-issue 'Triage issues') ;;
+		?*) want=$(skill_use deliver-issue 'Deliver issue #<N>'); want=${want//<N>/$n} ;;
+		*) want= ;;
+		esac
+		if [ -n "$n" ] && [ "$purpose" = use ] && [ "$wk" = com.github.api ] && [ -n "$want" ] &&
+			[ "$(echo "$asked" | base64 -d | jq -c .)" = "$(jq -cn --arg w "$want" '[$w]')" ]; then
+			local res; res=$(discobox-access run --use "$u" -- discobox secret request approve "$rid" </dev/null 2>&1 | tail -3 | head -1 | cut -c1-300)
 			echo "$(date -u +%FT%H:%M) approve $rid for #$n: $res" >>"$ORCH_DIR/approvals.log"
 			case "$res" in GRANT*) echo "approved #$n $rid" ;; *) echo "REFUSED #$n $rid: $res" ;; esac
 		else
-			echo "NEEDS LEAD: $rid from $sid ($purpose ${wk:-custom})"
+			echo "NEEDS LEAD: $rid from $sid ($purpose ${wk:-custom}): not its skill's use word for word; read it"
 		fi
 	done <<<"$reqs"
 }
@@ -183,7 +203,7 @@ cmd_kick() { # type "continue" into a worker whose last screen rows show "Login 
 }
 
 cmd_prs() { # one line per worker PR: <pr> <issue> <state> <merged> <mergeable_state>
-	need "$(use github 'pulls \(with query parameters\), repos/[^ ]+/pulls/<number>')" "PR reads" || return 1
+	need "$(use github "$TRACK")" "tracking GitHub" || return 1
 	workers | while IFS=$'\t' read -r n id pr; do
 		[ "$pr" = - ] && continue
 		gh_ api "repos/$REPO/pulls/$pr" --jq "\"$pr $n \(.state) \(.merged_at != null) \(.mergeable_state)\"" 2>/dev/null | tail -1 || true
@@ -222,7 +242,7 @@ cmd_after_merge() { # wait for GitHub to recompute, retire merged PRs' workers, 
 
 cmd_untriaged() { # untriaged: open issues with no triaged or platform/* label and no box on them, oldest first
 	local u page out all=
-	u=$(use github '^gh api GET repos/[^ ]+/issues \(with query parameters\)'); need "$u" "issue list" || return 1
+	u=$(use github "$TRACK"); need "$u" "tracking GitHub" || return 1
 	for page in $(seq 1 20); do
 		out=$(discobox-access run --use "$u" -- gh api "repos/$REPO/issues?state=open&sort=created&direction=asc&per_page=100&page=$page" </dev/null 2>/dev/null) || break
 		[ "$(echo "$out" | jq 'length' 2>/dev/null)" -gt 0 ] 2>/dev/null || break
@@ -259,7 +279,7 @@ cmd_triage() { # triage <issue>: launch a new box for this one issue, when a slo
 	if awk -F'\t' -v n="$n" '$2==n{f=1} END{exit !f}' "$T" || [ -n "$(id_of "$n")" ]; then echo "#$n already has a box"; return 1; fi
 	up=$(up_count) || { echo "$up"; return 1; }
 	[ "$up" -lt "$MAX" ] || { echo "no free slot: $up of $MAX boxes are up; #$n not launched"; return 1; }
-	u=$(use ai.discobox.sandbox '^discobox new -d'); need "$u" "discobox new" || return 1
+	u=$(use ai.discobox.sandbox "$CREATE"); need "$u" "creating boxes" || return 1
 	out=$(discobox-access run --use "$u" -- discobox new -d -C "https://github.com/$REPO@main" -p "Triage issue #$n in $REPO." </dev/null 2>&1)
 	id=$(echo "$out" | grep -o 'sbx_[a-z0-9]*' | head -1)
 	[ -n "$id" ] || { echo "#$n not launched: $(echo "$out" | tail -1)"; return 1; }
@@ -335,7 +355,7 @@ cmd_idle() {
 # makes only the PR list call, since every call is judged and takes seconds.
 cmd_github() {
 	local u n st prs
-	u=$(use github '^gh api GET repos/[^ ]+/issues/<number> and'); need "$u" "issue reads" || return 1
+	u=$(use github "$TRACK"); need "$u" "tracking GitHub" || return 1
 	touch "$ORCH_DIR/watch-issues.txt" "$ORCH_DIR/closed-issues.txt"
 	prs=$(gh_ api "repos/$REPO/pulls?state=all&sort=updated&direction=desc&per_page=50" \
 		--jq '.[] | select(.head.ref|startswith("discobox/issue-")) |
@@ -351,7 +371,7 @@ cmd_github() {
 	# still going is left out, and so is one cancelled by a newer push: on a busy main either would
 	# wake the lead for nothing.
 	local uc
-	uc=$(use github 'actions/runs \(with query'); need "$uc" "CI reads" || return 1
+	uc=$(use github "$TRACK"); need "$uc" "tracking GitHub" || return 1
 	discobox-access run --use "$uc" -- gh api "repos/$REPO/actions/runs?branch=main&status=completed&per_page=10" \
 		--jq '[.workflow_runs[] | select(.conclusion != "cancelled")][0] | "ci main \(.head_sha[0:8]) \(.conclusion)"' </dev/null 2>/dev/null | tail -1
 	{ workers | cut -f1; cat "$ORCH_DIR/watch-issues.txt"; } | grep -E '^[0-9]+$' | sort -un | while read -r n; do
