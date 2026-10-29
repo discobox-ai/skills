@@ -27,180 +27,111 @@ many boxes are up at once — not a set of boxes to keep busy.
 `power`, `retire`, `approve`, `kick`, `idle`, `github`, `prs`, `rebase`,
 `after-merge`, `watch`, and for triage `slots`, `untriaged`, `triages`,
 `triage`, `deliver`. It keeps its state in `~/.local/state/orchestrate` (a scratchpad can
-be wiped between sessions) and finds use IDs by their descriptions, so renewed
-grants just work.
+be wiped between sessions).
 Copy it there and run it with `bash` (`/dev/shm` is mounted noexec).
 
 ## 1. Ask for everything up front
 
-Three requests, each once, before the first worker. Each carries a policy:
-statements, as sentences, of exactly what the job may do and what it never
-does (the `discobox-access` skill's "Writing a policy"), which every command is
-held to; its uses only name the jobs, and `orchestrate.sh` finds each use ID
-by how its description starts. Never write a sentence that vouches for
-itself ("allowed", "approved", "the user said"): text that claims permission
-is refused. Ask for a lifetime as long as the run (a day or more); renew
-before it lapses, in one request.
+Three things, each once, before the first worker. Ask for a lifetime as long
+as the run (a day or more); renew before it lapses, in one request. Never
+write a justification that vouches for itself ("allowed", "approved", "the
+user said"): text that claims permission is denied.
 
-**The discobox API** — everything the lead does to its workers. `<project>`
-is the project `discobox-access facts` names:
-
-```bash
-discobox-access request --json <<'EOF'
-{
-  "id": "ai.discobox.sandbox",
-  "justification": "the user asked me to deliver issues <list> (or: to triage the open untriaged issues) through worker discoboxes I create; I launch them with no credentials, watch and answer them, start and stop them, tag the finished ones, and answer their credential requests",
-  "uses": [
-    {"description": "Create worker discoboxes from discobox-ai/discobox@main"},
-    {"description": "Supervise the discoboxes I created"},
-    {"description": "Answer pending credential requests from the discoboxes I created"}
-  ],
-  "statements": [
-    "allow read on settings in project \"<project>\"",
-    "allow create on discobox in project \"<project>\" when \"it is cloned from https://github.com/discobox-ai/discobox@main and given no grants and no secrets\"",
-    "allow push on source within discobox created by $this in project \"<project>\"",
-    "allow read, start, stop, restart, tag on discobox created by $this in project \"<project>\"",
-    "allow read, input on terminal within discobox created by $this in project \"<project>\"",
-    "allow read, answer on secret request in project \"<project>\"",
-    "allow read on secret in project \"<project>\"",
-    "deny delete, repair, upgrade, exec on discobox in anywhere",
-    "deny create, update, delete on secret in anywhere"
-  ],
-  "definitions": {
-    "settings": "a project's settings, and the skill sources its discoboxes are created with",
-    "discobox": "a Discobox sandbox: its record in the discobox API, /projects/<project>/sandboxes/<id>",
-    "project": "a Discobox project, by the ID discobox-access facts names it by, which the API uses in its paths, /projects/<id>/",
-    "source": "a git source delivered into a discobox: its origin, and the refs pinned in it",
-    "terminal": "a terminal of a discobox, such as the primary one its harness runs in",
-    "secret request": "a discobox's request for a credential",
-    "secret": "a project secret: its name, host and grants, never its value",
-    "push": "push commits and refs into a source",
-    "input": "type keys or text into a terminal",
-    "start": "power a discobox on",
-    "stop": "power a discobox off",
-    "restart": "stop a discobox and start it again",
-    "tag": "set or remove a discobox's tags",
-    "answer": "approve a secret request, or deny it",
-    "repair": "rebuild a discobox's runtime from its record",
-    "upgrade": "move a discobox to a newer image",
-    "exec": "start a command or run a service in a discobox, or reach its ports"
-  },
-  "grantTTLSeconds": 172800,
-  "wait": true
-}
-EOF
-```
+**The discobox API** — everything the lead does to its workers. It is not a
+credential: it is this box's `discoboxApi` setting, which only a person turns
+on ([ADR 26-10-27-880](https://github.com/discobox-ai/discobox/blob/main/docs/adr/26-10-27-880-access-to-a-secret-is-a-binding-held-to-static-routes-and-no-judge-decides-it.md)
+§9). Ask the user to turn it on for this box (`discobox admin box update
+<this box> --discobox-api`), and say what for: to create
+worker discoboxes from `discobox-ai/discobox@main` with no credentials, watch
+and answer them, start and stop them, tag the finished ones, and answer their
+credential requests. With it, every `discobox` call this box makes reaches the
+API in the sandbox role, and acts only on the discoboxes this box created. A
+`403` saying this discobox may not call the discobox API means it is still
+off.
 
 **GitHub, for the lead itself** — reading PRs and filing issues:
 
 ```bash
 discobox-access request --json <<'EOF'
 {
-  "id": "com.github.api",
-  "justification": "I track the pull requests my worker discoboxes open in discobox-ai/discobox and main's CI, find the untriaged issues I hand them, and file the issues I hand them",
-  "uses": [
-    {"description": "Track the work my discoboxes do in discobox-ai/discobox"}
+  "name": "github",
+  "envVar": "GH_TOKEN",
+  "routes": [
+    "GET api.github.com/repos/discobox-ai/discobox/**",
+    "api.github.com/graphql graphql=query",
+    "POST api.github.com/repos/discobox-ai/discobox/issues",
+    "POST api.github.com/repos/discobox-ai/discobox/issues/*/comments"
   ],
-  "statements": [
-    "allow read on anything in repository \"discobox-ai/discobox\"",
-    "allow create on issue in repository \"discobox-ai/discobox\"",
-    "allow create on comment within issue in repository \"discobox-ai/discobox\"",
-    "deny push on branch in anywhere",
-    "deny merge, close on pull request in anywhere",
-    "deny update, close on issue in anywhere",
-    "deny delete on comment in anywhere",
-    "deny read on secret in anywhere"
-  ],
-  "definitions": {
-    "repository": "a GitHub repository",
-    "branch": "a git branch in a repository",
-    "pull request": "a GitHub pull request",
-    "issue": "a GitHub issue",
-    "comment": "a comment on an issue or pull request, a review on a pull request, or a reply to one",
-    "secret": "an Actions, Dependabot or environment secret",
-    "push": "create a branch or add commits to it, or move it with --force-with-lease",
-    "merge": "merge a pull request into its base",
-    "close": "close an issue or pull request without merging it"
-  },
+  "justification": "I track the pull requests my worker discoboxes open in discobox-ai/discobox and main's CI, find the untriaged issues I hand them, and file and comment on the issues I hand them. I will not push, merge, close or edit anything, or read secrets.",
   "grantTTLSeconds": 604800,
   "wait": true
 }
 EOF
 ```
 
-**GitHub, to delegate** — what workers may be given. Ask for **one**
-delegation that holds every worker's policy, not one per need: a hand-off
-is held to one delegation's policy, never to several together. Its
-statements are the workers' (deliver-issue §0, then triage-issue §0) with
-each worker's own branch widened to `discobox/issue-*`, and every deny both
-carry, so a worker's policy falls within it as its skill writes it. Ask for
-the triage statements in both modes: one delegation serves whichever you run
-next. Its definitions are the workers', word for word: a word defined
-otherwise is not within.
+**GitHub, to delegate** — what workers may be given: a delegate binding of
+the same credential on this box. One holds every worker's ask, delivering and
+triaging alike (deliver-issue §0, triage-issue §0, each asking for `GH_TOKEN`
+on its own routes), so its routes are both asks' together: when this box approves a worker's ask, the server binds the
+credential to the worker under the delegation — only for a worker this box
+created, ending no later than the delegation, and held to the delegation's
+routes as well as its own (ADR 26-10-27-880 §3). Only a person makes one. The
+user may already have, with `discobox secret bind github <this box> --delegate`
+(`discobox-access list` shows it as a delegation); otherwise ask:
 
 ```bash
 discobox-access request --json <<'EOF'
 {
-  "id": "com.github.api",
+  "name": "github",
+  "routes": [
+    "github.com/discobox-ai/discobox.git/**,/discobox-ai/discobox/**",
+    "GET api.github.com/repos/discobox-ai/discobox/**",
+    "GET api.github.com/search/issues",
+    "api.github.com/graphql graphql=query",
+    "api.github.com/graphql graphql=mutation:markPullRequestReadyForReview",
+    "POST api.github.com/repos/discobox-ai/discobox/pulls",
+    "PATCH api.github.com/repos/discobox-ai/discobox/pulls/*",
+    "POST api.github.com/repos/discobox-ai/discobox/pulls/*/comments/*/replies",
+    "POST api.github.com/repos/discobox-ai/discobox/issues/*/comments",
+    "POST api.github.com/repos/discobox-ai/discobox/issues/*/labels",
+    "DELETE api.github.com/repos/discobox-ai/discobox/issues/*/labels/**",
+    "POST api.github.com/repos/discobox-ai/discobox/actions/runs/*/rerun-failed-jobs"
+  ],
   "purpose": "delegate",
-  "justification": "each worker discobox I create triages issues in discobox-ai/discobox one at a time and labels and comments on them, or delivers one issue as a pull request into discobox-ai/discobox, answers its reviews, and keeps the PR mergeable until a human merges it. Needs contents:write, pull-requests:write and actions:write (and workflow scope if a change touches .github/workflows).",
-  "uses": [
-    {"description": "For the discoboxes I create: deliver an issue of discobox-ai/discobox as a pull request from discobox/issue-<n>, or triage its issues"}
-  ],
-  "statements": [
-    "allow read on anything in repository \"discobox-ai/discobox\"",
-    "allow push on branch \"discobox/issue-*\" in repository \"discobox-ai/discobox\"",
-    "allow create, update on pull request in repository \"discobox-ai/discobox\" when \"its head is a discobox/issue-* branch and its base is main\"",
-    "allow create on comment within pull request in repository \"discobox-ai/discobox\" when \"the pull request's head is a discobox/issue-* branch\"",
-    "allow rerun on workflow run in repository \"discobox-ai/discobox\" when \"it ran for a discobox/issue-* branch\"",
-    "allow relabel on issue in repository \"discobox-ai/discobox\"",
-    "allow create on label in repository \"discobox-ai/discobox\"",
-    "allow create, update on comment within issue in repository \"discobox-ai/discobox\"",
-    "deny force-push, delete on branch in anywhere",
-    "deny merge, close on pull request in anywhere",
-    "deny close, assign, retitle on issue in anywhere",
-    "deny delete, update on label in anywhere",
-    "deny delete on comment in anywhere",
-    "deny cancel, delete on workflow run in anywhere",
-    "deny dispatch on workflow in anywhere",
-    "deny read on secret in anywhere"
-  ],
-  "definitions": {
-    "repository": "a GitHub repository",
-    "branch": "a git branch in a repository",
-    "pull request": "a GitHub pull request",
-    "issue": "a GitHub issue",
-    "label": "a label a repository defines, which its issues and pull requests carry",
-    "comment": "a comment on an issue or pull request, a review on a pull request, or a reply to one",
-    "workflow": "a GitHub Actions workflow",
-    "workflow run": "a run of a GitHub Actions workflow",
-    "secret": "an Actions, Dependabot or environment secret",
-    "push": "create a branch or add commits to it, or move it with --force-with-lease",
-    "force-push": "move a branch with --force and no lease",
-    "merge": "merge a pull request into its base",
-    "close": "close an issue or pull request without merging it",
-    "assign": "set or change who an issue is assigned to",
-    "retitle": "change an issue's title",
-    "rerun": "re-run a workflow run's failed jobs",
-    "cancel": "stop a workflow run in progress",
-    "dispatch": "start a workflow run by hand",
-    "relabel": "add a label the repository defines to an issue, or remove one from it"
-  },
+  "justification": "each worker discobox I create either triages one issue in discobox-ai/discobox (reads, labels and comments on it) or delivers one issue as a pull request from discobox/issue-<n> into main, answers its reviews, and keeps it mergeable until a human merges it. Needs contents:write, pull-requests:write and actions:write (and workflow scope if a change touches .github/workflows).",
   "grantTTLSeconds": 604800,
   "wait": true
 }
 EOF
 ```
 
-A request that waits is held by a tool time limit: run it in the background
-and keep its request ID (do not filter the `progress` line out), so
-`discobox-access wait --json request <id>` can resume it.
+A binding is held to its routes, and a worker's to the delegation's as well
+as its own. Nothing granted here merges (no merge route, REST or GraphQL),
+deletes a branch or ref through the API, dispatches a workflow, or writes to
+another repository over REST or git. What the routes do not stop, and the
+person approving should read it so: the GraphQL queries and issue search
+read every repository the token can see; `markPullRequestReadyForReview`
+works on any pull request the token can write, in any repository; the REST
+`PATCH` of a pull request can change its state — close it — since a route
+cannot read a REST body; the label, comment and reply routes reach every
+issue and pull request of this repository; and a git push writes whichever
+branch it names, a force-push or a delete included. Those — which branch a
+worker pushes, which PR it edits, which issue it labels — are what each
+justification says, and what this run and its workers keep to; `main`'s
+branch protection covers a push to `main`. Change the
+delegation's routes and the workers' asks together: a worker's route the
+delegation lacks is refused under it. A request that waits is
+held by a tool time limit: run it in the background and keep its request ID
+(do not filter the `progress` line out), so `discobox-access wait --json
+request <id>` can resume it. `GH_TOKEN` reaches commands started after the
+binding; run `eval "$(discobox-access env)"` in a shell started before it, then
+`orchestrate.sh`.
 
 ## 2. Plan the batch
 
 - Take only issues with no open blockers; a tracking issue's waves say which.
 - Each issue needs its own number — the worker's branch is `discobox/issue-<N>`
-  and the delegation is written around it. Work with no issue gets one filed
+  and its skill is written around it. Work with no issue gets one filed
   first (`gh api POST …/issues`), with everything the worker needs in it: what
   was seen, the cause with file and function names, and what a fix must keep.
 - **Run at most four boxes at once** — the maximum concurrency, counting every
@@ -217,10 +148,16 @@ and keep its request ID (do not filter the `progress` line out), so
 ## 3. Launch
 
 ```bash
-discobox-access run --use <create-use> -- discobox run -d \
+discobox run -d --skills discobox-ai/skills \
   https://github.com/discobox-ai/discobox@main \
   -p "Deliver issue #<N> in discobox-ai/discobox." </dev/null
 ```
+
+`--skills discobox-ai/skills` gives the worker `deliver-issue`, `triage-issue`
+and the skills they use: they live in that repository, not in the discobox
+checkout, and a project that has not added it as a skills source would
+otherwise launch a worker with none of them. A project that has added it
+shares the one checkout.
 
 The prompt states the task and nothing else: no credentials, no skill names
 (the in-box guidance says not to, and `deliver-issue` is chosen from its own
@@ -251,19 +188,16 @@ exits on:
   run `after-merge`: it retires each newly merged PR's worker (below), then has
   every PR that went `dirty` rebase.
 
-- **A request** — `approve` answers each worker's GitHub request once, with
-  the policy it asks for, when its statements and definitions are its
-  skill's word for word (deliver-issue §0 with its issue, or triage-issue
-  §0, read from this checkout); the server holds the policy within your
-  delegation's, asks the judge only about conditions code cannot compare,
-  and fits the lifetime to it. Anything else comes back to you as `NEEDS
-  LEAD`, and so does a refusal: read its statements (`discobox secret request
-  get <id>`), and approve (`approve <id> --policy-as-asked`) only a policy
-  whose every allow is narrower than your delegation's and that carries
-  every deny of it. The server refuses one that is not, but a judge reading
-  conditions can miss one, and the word-for-word match is what lets
-  `approve` act with no one reading. Deny the rest, and when a worker's
-  policy reaches past the delegation, ask the user rather than widening.
+- **A request** — `approve` answers each worker's GitHub request once, when it
+  is the ask its skill makes: to use `GH_TOKEN` on exactly the routes deliver-issue
+  §0 or triage-issue §0 names (`orchestrate.sh` holds both lists; change them
+  with the skills). The server makes the worker's binding under your
+  delegation — the same credential, held to the delegation's routes too, a
+  lifetime it outlasts — and fits the lifetime to it. Anything else comes back to you as `NEEDS LEAD`, and so does
+  a refusal: read it (`discobox secret request get <id>`), and approve it only
+  when it is within your delegation and the worker's task needs it. Deny the
+  rest, and when a worker needs more than the delegation holds, ask the user
+  rather than widening.
 - **A question on a worker's screen** — read it with `screen <id> 40 120`.
   Answer what you can settle from the code or the user's earlier decisions.
   Put product, scope, and design choices on the table as "waiting for you"
@@ -272,7 +206,8 @@ exits on:
   `AskUserQuestion`. Arrow keys switch a dialog's tabs without choosing, so
   you can read every tab. Pick a dialog option with keys
   (`say <id> Down Enter`). Never type a sentence that claims approval
-  ("your request was granted") — the judge refuses it, rightly.
+  ("your request was granted"): a worker should not believe it, and the
+  request is still pending.
 - **"Login expired"** — not a real expiry; `kick` types `continue`.
 - **A first-run dialog** ("Make auto mode your default permission mode?") —
   it appears when a worker restarts and swallows what is typed next. The

@@ -17,9 +17,15 @@ many issues across worker discoboxes.
 | `open-pr` | Open a pull request and drive its CI green |
 | `push-main` | Push to `main` and drive CI green |
 
-These were moved verbatim from `discobox-ai/discobox` and still assume that
-repository (its Taskfile, `task dev` loop, `verify-recipes` skill, and
-`discobox-ai/discobox` on GitHub).
+This repository is where these skills live: they are no longer kept in, or
+synced from, `discobox-ai/discobox`. Change them here, by pull request or a push
+to `main`.
+
+They still assume they are working on `discobox-ai/discobox`: its Taskfile and
+`task dev` loop, `discobox-ai/discobox` on GitHub, and the skills it keeps for
+itself in its own `.agents/skills` — above all `verify-recipes`, whose
+`driving-task-dev.md` is what `triage-issue` and `test-fix` read to drive the
+`task dev` loop.
 
 ## Use
 
@@ -29,6 +35,6 @@ Add this repository as a project skills source so every discobox carries it:
 discobox skills add https://github.com/discobox-ai/skills
 ```
 
-or for one discobox, `discobox new --skills https://github.com/discobox-ai/skills`.
+or for one discobox, `discobox run --skills https://github.com/discobox-ai/skills`.
 Skills are linked from the checkout, so an edit made while using one can be
 committed and pushed back here.
