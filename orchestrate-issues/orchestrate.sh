@@ -10,10 +10,9 @@
 # and in workers.tsv once it delivers it, and it is never handed another. ORCH_MAX (default 4)
 # caps how many of this run's boxes are up at once, triaging and delivering together.
 #
-# Use IDs are looked up by their descriptions on every call, so a renewed grant
-# is picked up without editing anything. discobox-access always gets
-# </dev/null: it shows the judge what a command reads on stdin, and in a loop it
-# would read the loop's input.
+# The discobox API is this box's own setting (discoboxApi, which a person turns
+# on), and GitHub is the GH_TOKEN binding (SKILL.md §1). Commands that could read
+# stdin get </dev/null: in a loop they would read the loop's input.
 set -uo pipefail
 # nix develop exports $out, and a local of that name inherits the export: a
 # page of issue JSON in it would reach every child's environment and fail exec.
@@ -36,39 +35,15 @@ touch "$W" "$T" "$ORCH_DIR/tried.txt" "$ORCH_DIR/rebased.txt" "$ORCH_DIR/retired
 JQ_TITLE='def title: ([(.runtime.agentStatus.sessions // [])[] | select(.primary and ((.title // "") != ""))]
 	| sort_by(.startedAt // "") | last | .title) // "";'
 
-# The uses SKILL.md §1 asks for, by the job each opens with.
-CREATE='^Create worker discoboxes'
-SUPERVISE='^Supervise the discoboxes I created'
-ANSWER='^Answer pending credential requests'
-TRACK='^Track the work my discoboxes do'
-
-# The checkout the skills are read from: a worker's ask is approved only when its policy is, word for
-# word, the one its skill asks for (cmd_approve). Without the skills nothing is approved here.
-ROOT=${ORCH_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}
-# skill_policy <skill> <prefix>: the policy that skill's SKILL.md asks for in the request whose use
-# starts with prefix, as {"statements": [...], "definitions": {...}}, compact and sorted.
-skill_policy() {
-	[ -n "$ROOT" ] || return 0
-	awk '/discobox-access request --json <</{f=1; next} f && /^ *EOF$/{f=0; next} f' "$ROOT/.agents/skills/$1/SKILL.md" 2>/dev/null |
-		jq -cS --arg p "$2" 'select((.uses[0].description // "") | startswith($p)) | {statements, definitions}' 2>/dev/null | head -1
+# need_github: GitHub is the GH_TOKEN binding, in the environment of every command started after it.
+# Without it the caller fails with MISSING BINDING, which watch exits on.
+need_github() {
+	[ -n "${GH_TOKEN:-}" ] && return 0
+	echo "MISSING BINDING: GH_TOKEN is not set; ask for GitHub (SKILL.md §1), and once it is bound run: eval \"\$(discobox-access env)\""
+	return 1
 }
-
-# use <credential-name> <regex>: the live use ID whose description matches.
-# The listing fails now and then for a moment, so an empty answer is asked again before it counts.
-use() {
-	local id i
-	for i in 1 2 3; do
-		id=$(discobox-access list --json </dev/null 2>/dev/null |
-			jq -r --arg c "$1" --arg re "$2" \
-				'[.credentials[] | select(.name==$c) | .uses[] | select(.description|test($re))] | last | .useId // empty')
-		[ -n "$id" ] && { echo "$id"; return; }
-		[ "$i" -lt 3 ] && sleep 5
-	done
-}
-# need <use-id> <what>: a missing use is printed as MISSING USE (watch exits on it) and fails the caller.
-need() { [ -n "$1" ] && return 0; echo "MISSING USE: no live use for $2; ask for it (SKILL.md §1)"; return 1; }
-box()  { local u; u=$(use ai.discobox.sandbox "$SUPERVISE"); need "$u" "supervising boxes" || return 1; discobox-access run --use "$u" -- discobox admin box "$@" </dev/null; }
-gh_()  { local u; u=$(use github "$TRACK"); need "$u" "tracking GitHub" || return 1; discobox-access run --use "$u" -- gh "$@" </dev/null; }
+box()  { discobox admin box "$@" </dev/null; }
+gh_()  { need_github || return 1; gh "$@" </dev/null; }
 
 workers() { grep -v '^\s*$' "$W" || true; }
 id_of()   { awk -v n="$1" '$1==n{print $2}' "$W"; }
@@ -102,21 +77,18 @@ cmd_status() {
 }
 
 cmd_screen() { # screen <discobox-id> [lines] [scrollback]
-	local u; u=$(use ai.discobox.sandbox "$SUPERVISE"); need "$u" "supervising boxes" || return 1
-	discobox-access run --use "$u" -- discobox admin terminal screen "$1" primary ${3:+--scrollback "$3"} </dev/null 2>&1 |
+	discobox admin terminal screen "$1" primary ${3:+--scrollback "$3"} </dev/null 2>&1 |
 		grep -v '^\s*$' | tail -"${2:-25}" | cut -c1-170
 }
 
 cmd_say() { # say <discobox-id> <keys or text>...
-	local id=$1 u; shift
-	u=$(use ai.discobox.sandbox "$SUPERVISE"); need "$u" "supervising boxes" || return 1
-	discobox-access run --use "$u" -- discobox admin terminal input "$id" primary "$@" </dev/null 2>&1 | tail -1
+	local id=$1; shift
+	discobox admin terminal input "$id" primary "$@" </dev/null 2>&1 | tail -1
 }
 
 cmd_power() { # power start|stop|restart <discobox-id>...
-	local verb=$1 u; shift
-	u=$(use ai.discobox.sandbox "$SUPERVISE"); need "$u" "supervising boxes" || return 1
-	discobox-access run --use "$u" -- discobox "$verb" "$@" </dev/null 2>&1 | tail -3
+	local verb=$1; shift
+	discobox "$verb" "$@" </dev/null 2>&1 | tail -3
 }
 
 # running <discobox-id> [seconds]: wait until the discobox is running and its harness is back at a prompt.
@@ -135,13 +107,12 @@ running() {
 # lead created (ADR 26-10-08-447). The lead cannot delete a box. A stopped worker cannot move its own
 # state tag (deliver-issue §6), so retire drops ready/blocked and, for a merged PR, sets merged.
 cmd_retire() { # retire <issue>|<discobox-id> [merged]: a triage box has no issue in workers.tsv, so take its ID
-	local n=$1 id u out tags=(to-delete)
+	local n=$1 id out tags=(to-delete)
 	[ "${2:-}" = merged ] && tags+=(merged)
 	case "$n" in sbx_*) id=$n ;; *) id=$(id_of "$n") ;; esac
 	[ -n "$id" ] || { echo "#$n: no worker"; return 1; }
 	box get "$id" -o json >/dev/null 2>&1 || { echo "$id" >>"$ORCH_DIR/retired.txt"; echo "#$n $id is already deleted"; return 0; }
-	u=$(use ai.discobox.sandbox "$SUPERVISE"); need "$u" "supervising boxes" || return 1
-	out=$(discobox-access run --use "$u" -- discobox tag "$id" "${tags[@]}" --rm ready --rm blocked </dev/null 2>&1) ||
+	out=$(discobox tag "$id" "${tags[@]}" --rm ready --rm blocked </dev/null 2>&1) ||
 		{ echo "#$n $id not tagged: $(echo "$out" | tail -1)"; return 1; }
 	echo "$id" >>"$ORCH_DIR/retired.txt"
 	awk -F'\t' -v OFS='\t' -v i="$id" '$1==i{$3="retired"} 1' "$T" >"$T.tmp" && mv "$T.tmp" "$T"
@@ -149,34 +120,68 @@ cmd_retire() { # retire <issue>|<discobox-id> [merged]: a triage box has no issu
 	echo "#$n $id tagged ${tags[*]} and stopped"
 }
 
-# A worker's ask is approved here only when its policy is the policy its own skill asks for, with its
-# issue filled in: deliver-issue §0 for a delivering box, triage-issue §0 for a triaging one. The
-# server holds a policy within the delegation's in code, but a judge reads conditions and can miss
-# one, and nothing here reads the ask; anything else goes to the lead to read, as NEEDS LEAD.
-cmd_approve() { # approve pending com.github.api use requests from workers, once each
-	local u reqs
-	u=$(use ai.discobox.sandbox "$ANSWER"); need "$u" "answering requests" || return 1
-	reqs=$(discobox-access run --use "$u" -- discobox secret request ls -o json </dev/null 2>/dev/null |
-		jq -r '.secretRequests[]? | select(.status=="pending")
-			| "\(.id) \(.sandboxId) \(.purpose) \(.wellKnownId) \({statements: (.policy.sentences // []), definitions: (.policy.definitions // {})} | @json | @base64)"')
-	while read -r rid sid purpose wk asked; do
+# A worker's ask is approved here only when it is the one its own skill asks for (deliver-issue §0,
+# triage-issue §0): to use GitHub in GH_TOKEN, on exactly the routes that skill names. The server
+# binds it to the worker under this lead's delegate binding — the same secret, held to the
+# delegation's routes too, a lifetime it outlasts — and refuses one from a box this lead did not
+# create. Anything else goes to the lead to read, as NEEDS LEAD.
+#
+# The routes are each skill's, in the canonical form `secretroute.Format` writes (lists sorted),
+# which route_text below rebuilds from the server's JSON. Change them with the skills' requests.
+DELIVER_ROUTES=(
+	'github.com/discobox-ai/discobox.git/**,/discobox-ai/discobox/**'
+	'GET api.github.com/repos/discobox-ai/discobox/**'
+	'api.github.com/graphql graphql=query'
+	'api.github.com/graphql graphql=mutation:markPullRequestReadyForReview'
+	'POST api.github.com/repos/discobox-ai/discobox/pulls'
+	'PATCH api.github.com/repos/discobox-ai/discobox/pulls/*'
+	'POST api.github.com/repos/discobox-ai/discobox/pulls/*/comments/*/replies'
+	'POST api.github.com/repos/discobox-ai/discobox/issues/*/comments'
+	'POST api.github.com/repos/discobox-ai/discobox/actions/runs/*/rerun-failed-jobs'
+)
+TRIAGE_ROUTES=(
+	'GET api.github.com/repos/discobox-ai/discobox/**'
+	'GET api.github.com/search/issues'
+	'api.github.com/graphql graphql=query'
+	'POST api.github.com/repos/discobox-ai/discobox/issues/*/labels'
+	'DELETE api.github.com/repos/discobox-ai/discobox/issues/*/labels/**'
+	'POST api.github.com/repos/discobox-ai/discobox/issues/*/comments'
+)
+
+# route_set: routes, one per line on stdin, as one sorted line joined by " ; ".
+route_set() { LC_ALL=C sort -u | awk 'NR > 1 { printf " ; " } { printf "%s", $0 } END { print "" }'; }
+
+cmd_approve() { # approve pending GitHub use requests from workers, once each
+	local reqs
+	reqs=$(discobox secret request ls -o json </dev/null 2>/dev/null |
+		jq -r '
+			def list($l): ($l // []) | join(",");
+			def route_text: (if (.methods // []) == [] then "" else list(.methods) + " " end)
+				+ list(.hosts) + list(.paths)
+				+ (if .graphql then " graphql=" + (if (.graphql.operations // []) == [] then "*" else list(.graphql.operations) end)
+					+ (if (.graphql.fields // []) == [] then "" else ":" + list(.graphql.fields) end) else "" end)
+				+ (if .mcp then " mcp=" + (if (.mcp.tools // []) == [] then "*" else list(.mcp.tools) end) else "" end)
+				+ (if .blocked then "=blocked" else "" end);
+			.secretRequests[]? | select(.status=="pending")
+			| "\(.id) \(.sandboxId) \(.purpose // "use") \(.envName // "-") \((.routes // []) | map(route_text) | join("\u001f"))"')
+	local deliver triage
+	deliver=$(printf '%s\n' "${DELIVER_ROUTES[@]}" | route_set)
+	triage=$(printf '%s\n' "${TRIAGE_ROUTES[@]}" | route_set)
+	while IFS=' ' read -r rid sid purpose env routes; do
 		[ -z "$rid" ] && continue
 		grep -qx "$rid" "$ORCH_DIR/tried.txt" && continue
 		echo "$rid" >>"$ORCH_DIR/tried.txt"
-		local n want; n=$(awk -v s="$sid" '$2==s{print $1}' "$W")
+		local n; n=$(awk -v s="$sid" '$2==s{print $1}' "$W")
 		[ -z "$n" ] && n=$(awk -v s="$sid" '$1==s{print "t"$2}' "$T")
-		case "$n" in
-		t*) want=$(skill_policy triage-issue 'Triage issues') ;;
-		?*) want=$(skill_policy deliver-issue 'Deliver issue #<N>'); want=${want//<N>/$n} ;;
-		*) want= ;;
-		esac
-		if [ -n "$n" ] && [ "$purpose" = use ] && [ "$wk" = com.github.api ] && [ -n "$want" ] &&
-			[ "$(echo "$asked" | base64 -d | jq -cS .)" = "$want" ]; then
-			local res; res=$(discobox-access run --use "$u" -- discobox secret request approve "$rid" --policy-as-asked </dev/null 2>&1 | tail -3 | head -1 | cut -c1-300)
+		routes=$(printf '%s' "$routes" | tr '\037' '\n' | route_set)
+		if [ -n "$n" ] && [ "$purpose" = use ] && [ "$env" = GH_TOKEN ] && { [ "$routes" = "$deliver" ] || [ "$routes" = "$triage" ]; }; then
+			local res status=0
+			res=$(discobox secret request approve "$rid" </dev/null 2>&1) || status=$?
+			res=$(printf '%s' "$res" | tail -3 | head -1 | cut -c1-300)
 			echo "$(date -u +%FT%H:%M) approve $rid for #$n: $res" >>"$ORCH_DIR/approvals.log"
-			case "$res" in GRANT*) echo "approved #$n $rid" ;; *) echo "REFUSED #$n $rid: $res" ;; esac
+			if [ "$status" = 0 ]; then echo "approved #$n $rid"; else echo "REFUSED #$n $rid: $res"; fi
 		else
-			echo "NEEDS LEAD: $rid from $sid ($purpose ${wk:-custom}): not its skill's policy word for word; read it"
+			echo "NEEDS LEAD: $rid from $sid ($purpose $env on $routes): not the ask its skill makes; read it"
 		fi
 	done <<<"$reqs"
 }
@@ -205,7 +210,7 @@ cmd_kick() { # type "continue" into a worker whose last screen rows show "Login 
 }
 
 cmd_prs() { # one line per worker PR: <pr> <issue> <state> <merged> <mergeable_state>
-	need "$(use github "$TRACK")" "tracking GitHub" || return 1
+	need_github || return 1
 	workers | while IFS=$'\t' read -r n id pr; do
 		[ "$pr" = - ] && continue
 		gh_ api "repos/$REPO/pulls/$pr" --jq "\"$pr $n \(.state) \(.merged_at != null) \(.mergeable_state)\"" 2>/dev/null | tail -1 || true
@@ -243,10 +248,10 @@ cmd_after_merge() { # wait for GitHub to recompute, retire merged PRs' workers, 
 }
 
 cmd_untriaged() { # untriaged: open issues with no triaged or platform/* label and no box on them, oldest first
-	local u page out all=
-	u=$(use github "$TRACK"); need "$u" "tracking GitHub" || return 1
+	local page out all=
+	need_github || return 1
 	for page in $(seq 1 20); do
-		out=$(discobox-access run --use "$u" -- gh api "repos/$REPO/issues?state=open&sort=created&direction=asc&per_page=100&page=$page" </dev/null 2>/dev/null) || break
+		out=$(gh api "repos/$REPO/issues?state=open&sort=created&direction=asc&per_page=100&page=$page" </dev/null 2>/dev/null) || break
 		[ "$(echo "$out" | jq 'length' 2>/dev/null)" -gt 0 ] 2>/dev/null || break
 		all+=$(echo "$out" | jq -r '.[] | select(.pull_request | not)
 			| select([.labels[].name] | any(. == "triaged" or startswith("platform/")) | not)
@@ -277,12 +282,13 @@ cmd_triages() { # one line per triage box: <discobox-id> <issue> <state> <its ve
 }
 
 cmd_triage() { # triage <issue>: launch a new box for this one issue, when a slot is free under ORCH_MAX
-	local n=$1 u up out id
+	local n=$1 up out id
 	if awk -F'\t' -v n="$n" '$2==n{f=1} END{exit !f}' "$T" || [ -n "$(id_of "$n")" ]; then echo "#$n already has a box"; return 1; fi
 	up=$(up_count) || { echo "$up"; return 1; }
 	[ "$up" -lt "$MAX" ] || { echo "no free slot: $up of $MAX boxes are up; #$n not launched"; return 1; }
-	u=$(use ai.discobox.sandbox "$CREATE"); need "$u" "creating boxes" || return 1
-	out=$(discobox-access run --use "$u" -- discobox run -d "https://github.com/$REPO@main" -p "Triage issue #$n in $REPO." </dev/null 2>&1)
+	# The skills live in discobox-ai/skills, not the checkout: name them, so a
+	# worker has triage-issue whether or not the project added the source.
+	out=$(discobox run -d --skills discobox-ai/skills "https://github.com/$REPO@main" -p "Triage issue #$n in $REPO." </dev/null 2>&1)
 	id=$(echo "$out" | grep -o 'sbx_[a-z0-9]*' | head -1)
 	[ -n "$id" ] || { echo "#$n not launched: $(echo "$out" | tail -1)"; return 1; }
 	triage_set "$id" "$n" triaging
@@ -355,10 +361,10 @@ cmd_idle() {
 # workers.tsv does not know yet is recorded there, if it is open: a relaunched worker must
 # not take the closed PR an earlier worker left on its branch. Closed issues are cached in
 # closed-issues.txt, so a pass costs one PR list call and one call per open issue; "github prs"
-# makes only the PR list call, since every call is judged and takes seconds.
+# makes only the PR list call.
 cmd_github() {
-	local u n st prs
-	u=$(use github "$TRACK"); need "$u" "tracking GitHub" || return 1
+	local n st prs
+	need_github || return 1
 	touch "$ORCH_DIR/watch-issues.txt" "$ORCH_DIR/closed-issues.txt"
 	prs=$(gh_ api "repos/$REPO/pulls?state=all&sort=updated&direction=desc&per_page=50" \
 		--jq '.[] | select(.head.ref|startswith("discobox/issue-")) |
@@ -373,13 +379,11 @@ cmd_github() {
 	# main's latest finished CI run, "ci main <sha> success|failure|...", so a red main is seen. A run
 	# still going is left out, and so is one cancelled by a newer push: on a busy main either would
 	# wake the lead for nothing.
-	local uc
-	uc=$(use github "$TRACK"); need "$uc" "tracking GitHub" || return 1
-	discobox-access run --use "$uc" -- gh api "repos/$REPO/actions/runs?branch=main&status=completed&per_page=10" \
+	gh api "repos/$REPO/actions/runs?branch=main&status=completed&per_page=10" \
 		--jq '[.workflow_runs[] | select(.conclusion != "cancelled")][0] | "ci main \(.head_sha[0:8]) \(.conclusion)"' </dev/null 2>/dev/null | tail -1
 	{ workers | cut -f1; cat "$ORCH_DIR/watch-issues.txt"; } | grep -E '^[0-9]+$' | sort -un | while read -r n; do
 		if grep -qx "$n" "$ORCH_DIR/closed-issues.txt"; then echo "issue $n closed"; continue; fi
-		st=$(discobox-access run --use "$u" -- gh api "repos/$REPO/issues/$n" --jq .state </dev/null 2>/dev/null | tail -1)
+		st=$(gh api "repos/$REPO/issues/$n" --jq .state </dev/null 2>/dev/null | tail -1)
 		case "$st" in
 		closed) echo "$n" >>"$ORCH_DIR/closed-issues.txt"; echo "issue $n closed" ;;
 		open) echo "issue $n open" ;;
@@ -391,7 +395,7 @@ cmd_github() {
 cmd_watch() { # watch [minutes]: approve, kick, and exit on an issue or PR change on GitHub, a PR conflict, a triage verdict, a lead-needed request, a box going idle or resuming, low disk, or the heartbeat
 	local end=$((SECONDS + ${1:-30} * 60)) tick=0 prev cur out free idle
 	snap() { awk '{m=$5; if (m!="dirty") m="ok"; print $1, $3, $4, m}' | sort; }
-	local prs gh0 gh1 pr0 pr1 i
+	local prs gh0 gh1 pr0 pr1
 	# The lead needs no dev loop, but a session restart brings task dev's image watcher back, and
 	# it builds into a cache of tens of GB on the pool's one disk. Stop it here, every watch.
 	pkill -f '[d]iscobox-docker-image-watch' 2>/dev/null || true
@@ -403,7 +407,7 @@ cmd_watch() { # watch [minutes]: approve, kick, and exit on an issue or PR chang
 	pr0=$(echo "$gh0" | grep '^pr ')
 	while :; do
 		out=$(cmd_approve)
-		echo "$out" | grep -E '^(REFUSED|NEEDS LEAD|MISSING USE)' && exit 0
+		echo "$out" | grep -E '^(REFUSED|NEEDS LEAD|MISSING BINDING)' && exit 0
 		prs=$(cmd_prs) || { echo "$prs"; exit 0; }
 		tick=$((tick + 1))
 		[ $((tick % 4)) -eq 1 ] && cmd_kick >/dev/null
@@ -423,18 +427,18 @@ cmd_watch() { # watch [minutes]: approve, kick, and exit on an issue or PR chang
 		if [ -n "$cur" ] && [ "$cur" != "$prev" ]; then echo "PR CHANGE:"; diff <(echo "$prev") <(echo "$cur") | grep '^[<>]'; exit 0; fi
 		[ $SECONDS -ge $end ] && { echo "HEARTBEAT ${free}G free"; cmd_status; exit 0; }
 		# Issues once a pass, PRs every 15s between passes: an issue closed or reopened, a PR opened,
-		# merged or closed. The human waits on what follows. A "?" or a use the listing briefly lost is a
-		# failed read, not a change.
+		# merged or closed. The human waits on what follows. A "?" or a missing binding is a failed read,
+		# not a change.
 		gh1=$(cmd_github | sort)
-		if [ -n "$gh1" ] && ! echo "$gh1" | grep -qE ' \?$|MISSING USE' && [ "$gh1" != "$gh0" ]; then
+		if [ -n "$gh1" ] && ! echo "$gh1" | grep -qE ' \?$|MISSING BINDING' && [ "$gh1" != "$gh0" ]; then
 			echo "GITHUB:"; comm -13 <(echo "$gh0") <(echo "$gh1") | sed 's/^/  now /'
 			echo "$gh1" >"$ORCH_DIR/github.last"
 			exit 0
 		fi
-		for i in 1 2 3 4; do
+		for _ in 1 2 3 4; do
 			sleep 15
 			pr1=$(cmd_github prs | sort) || continue
-			echo "$pr1" | grep -q 'MISSING USE' && continue
+			echo "$pr1" | grep -q 'MISSING BINDING' && continue
 			if [ -n "$pr1" ] && [ "$pr1" != "$pr0" ]; then
 				echo "GITHUB:"; comm -13 <(echo "$pr0") <(echo "$pr1") | sed 's/^/  now /'
 				{ echo "$gh0" | grep -v '^pr '; echo "$pr1"; } | sort >"$ORCH_DIR/github.last"
@@ -447,5 +451,5 @@ cmd_watch() { # watch [minutes]: approve, kick, and exit on an issue or PR chang
 case "${1:-}" in
 status | screen | say | power | retire | approve | kick | idle | github | prs | rebase | watch | slots | untriaged | triages | triage | deliver) c=$1; shift; "cmd_$c" "$@" ;;
 after-merge) shift; cmd_after_merge "$@" ;;
-*) sed -n '2,16p' "$0"; echo "usage: $0 status|screen|say|power|retire|approve|kick|idle|github|prs|rebase|after-merge|watch|slots|untriaged|triages|triage|deliver ..."; exit 2 ;;
+*) sed -n '2,15p' "$0"; echo "usage: $0 status|screen|say|power|retire|approve|kick|idle|github|prs|rebase|after-merge|watch|slots|untriaged|triages|triage|deliver ..."; exit 2 ;;
 esac

@@ -49,8 +49,9 @@ cat /proc/loadavg        # cli and tui suites fail spuriously above ~100
    ci:test` instead.
 3. **Bats**, when the change reaches the Docker-backed flow (providers, pools,
    box lifecycle, harness configure, transfer, upgrade, SSH): the matching
-   suite in `test/bats`, run as in [driving-task-dev.md](driving-task-dev.md)
-   §Bats. CI does not run Bats — this is the only place they run. A suite that
+   suite in `test/bats`, run as in the repository's `verify-recipes` skill's
+   `driving-task-dev.md` (`.agents/skills/verify-recipes/driving-task-dev.md`
+   in the discobox repository) §Bats. CI does not run Bats — this is the only place they run. A suite that
    skipped everything is not a pass.
 4. **Static checks**: `go tool task check-hooks` until clean, then `go tool
    task ci:check` and `go tool task verify`. `verify` races the dev loop: an
@@ -81,8 +82,10 @@ change is not QA.
 
 ### Before QA starts
 
-- The dev loop has rebuilt onto what you are testing ([driving-task-dev.md
-  §Waiting for a rebuild](driving-task-dev.md)), including any image the
+- The dev loop has rebuilt onto what you are testing (`driving-task-dev.md`
+  §Waiting for a rebuild, in the repository's `verify-recipes` skill:
+  `.agents/skills/verify-recipes/driving-task-dev.md` in the discobox
+  repository), including any image the
   change reaches. QA testing the previous build is the most common way this
   phase lies.
 - Pick a report path in the scratchpad: `<scratchpad>/qa-<N or slug>.md`.
@@ -105,7 +108,8 @@ Delegate to **one** subagent with this brief, filled in:
 >
 > **Build under test:** `<sha>` (or `<sha>+dirty`, HEAD plus the working tree).
 > The `task dev` loop is already running it. Read
-> `.agents/skills/test-fix/driving-task-dev.md` before anything else and follow
+> `.agents/skills/verify-recipes/driving-task-dev.md` (part of this
+> repository's `verify-recipes` skill) before anything else and follow
 > it — above all, pass `--server http://127.0.0.1:8080` to every
 > `./build/discobox` call, or you are testing the wrong server.
 >
