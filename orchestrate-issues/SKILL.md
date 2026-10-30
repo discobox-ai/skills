@@ -184,7 +184,10 @@ exits on:
   A red `main` goes at the top of the table. The baseline is the last state
   reported (`github.last`), so nothing that changed between watches is
   missed. The tracked set is every worker's issue and PR, plus the issues in
-  `watch-issues.txt`; add the ones you file or are told about. The user never has to tell you about a merge or a close. On a merge,
+  `watch-issues.txt`; add the ones you file or are told about. A worker's PR is
+  found only on a `discobox/issue-<N>` branch, so add any other PR you follow
+  to `watch-prs.txt`, one `<owner/repo> <number>` a line: an ADR a worker
+  opens off a slug branch, or a PR in another repository. The user never has to tell you about a merge or a close. On a merge,
   run `after-merge`: it retires each newly merged PR's worker (below), then has
   every PR that went `dirty` rebase.
 
