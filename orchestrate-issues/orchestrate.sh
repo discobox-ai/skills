@@ -5,7 +5,7 @@
 # wiped scratchpad: workers.tsv ("<issue>\t<discobox-id>\t<pr>", pr may be "-"),
 # triage.tsv (triage mode: "<discobox-id>\t<issue>\t<triaging|done|retired>"), verdicts.log,
 # tried.txt (request IDs already answered), rebased.txt, retired.txt, idle-seen.txt,
-# idle-reported.txt, github.last, watch-issues.txt, closed-issues.txt, approvals.log, kicks.log.
+# idle-reported.txt, github.last, watch-issues.txt, closed-issues.txt, watch-prs.txt, closed-prs.txt, approvals.log, kicks.log.
 # A box belongs to one issue for its whole life: it is in triage.tsv while it triages that issue
 # and in workers.tsv once it delivers it, and it is never handed another. ORCH_MAX (default 4)
 # caps how many of this run's boxes are up at once, triaging and delivering together.
@@ -388,6 +388,21 @@ cmd_github() {
 		closed) echo "$n" >>"$ORCH_DIR/closed-issues.txt"; echo "issue $n closed" ;;
 		open) echo "issue $n open" ;;
 		*) echo "issue $n ?" ;;
+		esac
+	done
+	# watch-prs.txt: PRs the lead follows whatever their branch, one "<owner/repo> <number>" a
+	# line (a bare number is this repository's): a worker's ADR PR off a slug branch, or one in
+	# another repository. A merged or closed one is cached in closed-prs.txt.
+	touch "$ORCH_DIR/watch-prs.txt" "$ORCH_DIR/closed-prs.txt"
+	grep -v '^[[:space:]]*$' "$ORCH_DIR/watch-prs.txt" | while read -r r p; do
+		[ -n "$p" ] || { p=$r; r=$REPO; }
+		st=$(awk -v r="$r" -v p="$p" '$1==r && $2==p {print $3; exit}' "$ORCH_DIR/closed-prs.txt")
+		[ -n "$st" ] && { echo "watched-pr $r#$p $st"; continue; }
+		st=$(gh api "repos/$r/pulls/$p" --jq 'if .merged_at then "merged" else .state end' </dev/null 2>/dev/null | tail -1)
+		case "$st" in
+		merged | closed) echo "$r $p $st" >>"$ORCH_DIR/closed-prs.txt"; echo "watched-pr $r#$p $st" ;;
+		open) echo "watched-pr $r#$p open" ;;
+		*) echo "watched-pr $r#$p ?" ;;
 		esac
 	done
 }
