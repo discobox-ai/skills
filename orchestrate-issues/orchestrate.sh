@@ -176,7 +176,9 @@ cmd_approve() { # approve pending GitHub use requests from workers, once each
 		routes=$(printf '%s' "$routes" | tr '\037' '\n' | route_set)
 		if [ -n "$n" ] && [ "$purpose" = use ] && [ "$env" = GH_TOKEN ] && { [ "$routes" = "$deliver" ] || [ "$routes" = "$triage" ]; }; then
 			local res status=0
-			res=$(discobox secret request approve "$rid" </dev/null 2>&1) || status=$?
+			# A lead may hold delegations of several secrets (github and a provider key), so name the one
+			# these GitHub routes are answered from.
+			res=$(discobox secret request approve "$rid" --secret github </dev/null 2>&1) || status=$?
 			res=$(printf '%s' "$res" | tail -3 | head -1 | cut -c1-300)
 			echo "$(date -u +%FT%H:%M) approve $rid for #$n: $res" >>"$ORCH_DIR/approvals.log"
 			if [ "$status" = 0 ]; then echo "approved #$n $rid"; else echo "REFUSED #$n $rid: $res"; fi
