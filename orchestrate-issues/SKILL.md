@@ -164,7 +164,9 @@ The prompt states the task and nothing else: no credentials, no skill names
 description), no claims of what is allowed. Cut from GitHub (the URL as SOURCE),
 not from this checkout, so workers start from `main`. Record each worker:
 `printf '<N>\t<id>\t-\n' >> ~/.local/state/orchestrate/workers.tsv`, and fill
-in the PR number when it opens.
+in the PR number when it opens. A worker's PR in another repository is not
+one: its number would name this repository's PR of that number. It stays `-`,
+goes in `watch-prs.txt` (§4), and you `retire <N>` once it merges.
 
 ## 4. Drive
 
@@ -187,7 +189,9 @@ exits on:
   `watch-issues.txt`; add the ones you file or are told about. A worker's PR is
   found only on a `discobox/issue-<N>` branch, so add any other PR you follow
   to `watch-prs.txt`, one `<owner/repo> <number>` a line: an ADR a worker
-  opens off a slug branch, or a PR in another repository. The user never has to tell you about a merge or a close. On a merge,
+  opens off a slug branch, or a PR in another repository. One reads `not-found`
+when GitHub has no such PR or the token cannot see it, and `bad-line` when the
+line names none. The user never has to tell you about a merge or a close. On a merge,
   run `after-merge`: it retires each newly merged PR's worker (below), then has
   every PR that went `dirty` rebase.
 

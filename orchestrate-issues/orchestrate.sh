@@ -391,20 +391,32 @@ cmd_github() {
 		esac
 	done
 	# watch-prs.txt: PRs the lead follows whatever their branch, one "<owner/repo> <number>" a
-	# line (a bare number is this repository's): a worker's ADR PR off a slug branch, or one in
-	# another repository. A merged or closed one is cached in closed-prs.txt.
+	# line ("<owner/repo>#<number>" and a bare number, this repository's, too): a worker's ADR PR
+	# off a slug branch, or one in another repository. Read through GraphQL, the one read the
+	# lead's token holds outside this repository. A line that names no PR reads "bad-line", and one
+	# GitHub does not find (or the token cannot see) "not-found": states, not a failed read ("?"),
+	# which would hold back the whole pass for the rest of the run. A merged or closed one is
+	# cached in closed-prs.txt.
 	touch "$ORCH_DIR/watch-prs.txt" "$ORCH_DIR/closed-prs.txt"
-	grep -v '^[[:space:]]*$' "$ORCH_DIR/watch-prs.txt" | while read -r r p; do
-		[ -n "$p" ] || { p=$r; r=$REPO; }
+	grep -v '^[[:space:]]*$' "$ORCH_DIR/watch-prs.txt" | while read -r l; do
+		read -r r p _ <<<"$l"
+		[ -n "$p" ] || case "$r" in *'#'*) p=${r##*#}; r=${r%#*} ;; *) p=$r; r=$REPO ;; esac
+		if ! [[ $r =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && $p =~ ^[0-9]+$ ]]; then
+			echo "watched-pr bad-line $l"; continue
+		fi
 		st=$(awk -v r="$r" -v p="$p" '$1==r && $2==p {print $3; exit}' "$ORCH_DIR/closed-prs.txt")
 		[ -n "$st" ] && { echo "watched-pr $r#$p $st"; continue; }
-		st=$(gh api "repos/$r/pulls/$p" --jq 'if .merged_at then "merged" else .state end' </dev/null 2>/dev/null | tail -1)
+		st=$(gh api graphql -f o="${r%/*}" -f n="${r#*/}" -F p="$p" \
+			-f query='query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){state}}}' \
+			--jq '.data.repository.pullRequest.state | ascii_downcase' </dev/null 2>/dev/null | tail -1)
 		case "$st" in
 		merged | closed) echo "$r $p $st" >>"$ORCH_DIR/closed-prs.txt"; echo "watched-pr $r#$p $st" ;;
 		open) echo "watched-pr $r#$p open" ;;
+		*NOT_FOUND*) echo "watched-pr $r#$p not-found" ;;
 		*) echo "watched-pr $r#$p ?" ;;
 		esac
 	done
+	return 0
 }
 
 cmd_watch() { # watch [minutes]: approve, kick, and exit on an issue or PR change on GitHub, a PR conflict, a triage verdict, a lead-needed request, a box going idle or resuming, low disk, or the heartbeat
